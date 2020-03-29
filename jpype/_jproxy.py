@@ -32,53 +32,60 @@ def _checkInterfaceOverrides(interfaces, overrides):
                 raise NotImplementedError("Interface '%s' requires method '%s' to be implemented." % (
                     interface.class_.getName(), method.getName()))
 
+def _classOverrides(cls):
+    # Find all class defined overrides
+    overrides = {}
+    for k, v in cls.__dict__.items():
+        try:
+            attr = object.__getattribute__(v, "__joverride__")
+            overrides[k] = (v, attr)
+        except AttributeError:
+            pass
+    return overrides
+
+
+def _prepareInterfaces(cls, intf):
+    # Convert the interfaces list
+    actualIntf = _convertInterfaces(intf)
+    overrides = _classOverrides(cls)
+    _checkInterfaceOverrides(actualIntf, overrides)
+    return actualIntf
+
+
+def _createJProxyDeferred(cls, *intf, **kwargs):
+    """ (internal) Create a proxy from a python class with
+    @JOverride notation on methods.
+    """
+    def new(tp, *args, **kwargs):
+        # Attach a __jpype_interfaces__ attribute to this class if
+        # one doesn't already exist.
+        actualIntf = getattr(tp, "__jpype_interfaces__", None)
+        if actualIntf is None:
+            actualIntf = _prepareInterfaces(cls, intf)
+            tp.__jpype_interfaces__ = actualIntf
+        self = _jpype._JProxy.__new__(tp, None, actualIntf)
+        tp.__init__(self, *args, **kwargs)
+        return self
+
+    members = {'__new__': new}
+    return type("proxy.%s" % cls.__name__, (cls, _jpype._JProxy), members)
+
 
 def _createJProxy(cls, *intf, **kwargs):
     """ (internal) Create a proxy from a python class with
     @JOverride notation on methods.
     """
-    # TODO: When Python2 is dropped these kwargs can become keyword-only kwargs
-    deferred = bool(kwargs.pop('deferred', False))
-    if kwargs:
-        raise TypeError('Invalid keywords: {}'.format(
-            ','.join([str(kwarg) for kwarg in kwargs])))
-
-    def _classOverrides(cls):
-        # Find all class defined overrides
-        overrides = {}
-        for k, v in cls.__dict__.items():
-            try:
-                attr = object.__getattribute__(v, "__joverride__")
-                overrides[k] = (v, attr)
-            except AttributeError:
-                pass
-        return overrides
-
-    def _prepareInterfaces(cls, intf):
-        # Convert the interfaces list
-        actualIntf = _convertInterfaces(intf)
-        overrides = _classOverrides(cls)
-        _checkInterfaceOverrides(actualIntf, overrides)
-        return actualIntf
-
+    actualIntf = _prepareInterfaces(cls, intf)
     def new(tp, *args, **kwargs):
-        # Attach a __jpype_interfaces__ attribute to this class if
-        # one doesn't already exist.
-        if getattr(tp, "__jpype_interfaces__", None) is None:
-            tp.__jpype_interfaces__ = _prepareInterfaces(cls, intf)
-        self = _jpype._JProxy.__new__(tp, None, tp.__jpype_interfaces__)
+        self = _jpype._JProxy.__new__(tp, None, actualIntf)
         tp.__init__(self, *args, **kwargs)
         return self
 
     members = {'__new__': new}
-    if not deferred:
-        members['__jpype_interfaces__'] = _prepareInterfaces(cls, intf)
-
-    # Return the augmented class
     return type("proxy.%s" % cls.__name__, (cls, _jpype._JProxy), members)
 
 
-def JImplements(*interfaces, **kwargs):
+def JImplements(*interfaces, deferred=False, **kwargs):
     """ Annotation for creating a new proxy that implements one or more
     Java interfaces.
 
@@ -115,8 +122,12 @@ def JImplements(*interfaces, **kwargs):
                pass
 
     """
-    def JProxyCreator(cls):
-        return _createJProxy(cls, *interfaces, **kwargs)
+    if deferred:
+        def JProxyCreator(cls):
+            return _createJProxyDeferred(cls, *interfaces, **kwargs)
+    else:
+        def JProxyCreator(cls):
+            return _createJProxy(cls, *interfaces, **kwargs)
     return JProxyCreator
 
 
